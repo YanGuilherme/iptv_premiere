@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    container_name: iptv-premiere-api
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      PORT: "8000"
+    volumes:
+      - ./app/channels.json:/app/app/channels.json:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s

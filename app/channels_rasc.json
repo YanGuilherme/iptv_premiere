@@ -1,0 +1,23 @@
+[
+    {
+        "tvg_id": "Canal-1",
+        "name": "Canal 1",
+        "group": "Esportes",
+        "logo": "https://via.placeholder.com/256x256.png?text=PE1",
+        "url": "https://host.com/path/index.m3u8",
+        "headers": {
+            "Accept": "",
+            "Accept-Language": "",
+            "Origin": "",
+            "Priority": "",
+            "Referer": "",
+            "Sec-CH-UA": "",
+            "Sec-CH-UA-Mobile": "",
+            "Sec-CH-UA-Platform": "",
+            "Sec-Fetch-Dest": "",
+            "Sec-Fetch-Mode": "",
+            "Sec-Fetch-Site": "",
+            "User-Agent": ""
+        }
+    }
+]
