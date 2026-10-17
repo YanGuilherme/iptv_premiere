@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
-from urllib.parse import unquote, urlparse
 import logging
+import time
+from urllib.parse import unquote, urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -14,6 +16,17 @@ from app.hls import is_http_url, looks_like_playlist, origin_headers, rewrite_pl
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+SEGMENT_SUFFIXES = {
+    ".aac",
+    ".ac3",
+    ".ec3",
+    ".m4a",
+    ".m4s",
+    ".mp4",
+    ".ts",
+}
 
 HOP_BY_HOP = {
     "connection",
@@ -138,17 +151,33 @@ async def _proxy_resource(
     force_playlist: bool = False,
 ) -> Response:
     client: httpx.AsyncClient = request.app.state.http
-
+    started_at = time.perf_counter()
     headers = origin_headers(channel_headers, request.headers)
+    resource_path = urlparse(target).path
+    resource_name = resource_path.rsplit("/", 1)[-1] or resource_path or "/"
+    is_segment = resource_path.lower().endswith(tuple(SEGMENT_SUFFIXES))
+
     upstream_request = client.build_request(request.method, target, headers=headers)
 
     try:
         upstream = await client.send(upstream_request, stream=True)
     except httpx.RequestError as exc:
+        logger.warning(
+            "Origem indisponível canal=%s recurso=%s erro=%s",
+            tvg_id,
+            resource_name,
+            type(exc).__name__,
+        )
         raise HTTPException(status_code=502, detail=f"Falha ao buscar origem: {exc}") from exc
 
     try:
         if upstream.status_code >= 400:
+            logger.warning(
+                "Origem recusou recurso canal=%s recurso=%s status=%d",
+                tvg_id,
+                resource_name,
+                upstream.status_code,
+            )
             raise HTTPException(status_code=upstream.status_code, detail="Origem recusou a mídia")
 
         content_type = upstream.headers.get("content-type", "application/octet-stream").split(";", 1)[0].strip()
@@ -157,6 +186,13 @@ async def _proxy_resource(
 
         if force_playlist or looks_like_playlist(target, content_type, b""):
             if request.method == "HEAD":
+                logger.info(
+                    "Playlist consultada canal=%s recurso=%s status=%d duracao_ms=%.1f",
+                    tvg_id,
+                    resource_name,
+                    upstream.status_code,
+                    (time.perf_counter() - started_at) * 1000,
+                )
                 return Response(
                     status_code=200,
                     media_type="application/vnd.apple.mpegurl",
@@ -165,6 +201,17 @@ async def _proxy_resource(
             body = await upstream.aread()
             rewritten = rewrite_playlist(
                 body.decode("utf-8", errors="replace"), target, request, tvg_id
+            )
+            reference_count = sum(
+                1 for line in rewritten.splitlines() if line.strip() and not line.lstrip().startswith("#")
+            )
+            logger.info(
+                "Playlist entregue canal=%s recurso=%s status=200 referencias=%d bytes=%d duracao_ms=%.1f",
+                tvg_id,
+                resource_name,
+                reference_count,
+                len(rewritten.encode("utf-8")),
+                (time.perf_counter() - started_at) * 1000,
             )
             return PlainTextResponse(
                 content=rewritten,
@@ -180,6 +227,14 @@ async def _proxy_resource(
             and key.lower() != "content-type"
         }
         if request.method == "HEAD":
+            logger.info(
+                "%s consultado canal=%s recurso=%s status=%d duracao_ms=%.1f",
+                "Segmento" if is_segment else "Mídia",
+                tvg_id,
+                resource_name,
+                upstream.status_code,
+                (time.perf_counter() - started_at) * 1000,
+            )
             return Response(
                 status_code=upstream.status_code,
                 media_type=content_type,
@@ -190,9 +245,42 @@ async def _proxy_resource(
         upstream = None
 
         async def stream():
+            bytes_sent = 0
             try:
                 async for chunk in stream_resp.aiter_bytes():
+                    bytes_sent += len(chunk)
                     yield chunk
+            except asyncio.CancelledError:
+                logger.warning(
+                    "%s interrompido canal=%s recurso=%s status=%d bytes=%d duracao_ms=%.1f",
+                    "Segmento" if is_segment else "Mídia",
+                    tvg_id,
+                    resource_name,
+                    stream_resp.status_code,
+                    bytes_sent,
+                    (time.perf_counter() - started_at) * 1000,
+                )
+                raise
+            except Exception:
+                logger.exception(
+                    "Falha ao entregar %s canal=%s recurso=%s bytes=%d duracao_ms=%.1f",
+                    "segmento" if is_segment else "mídia",
+                    tvg_id,
+                    resource_name,
+                    bytes_sent,
+                    (time.perf_counter() - started_at) * 1000,
+                )
+                raise
+            else:
+                logger.info(
+                    "%s entregue canal=%s recurso=%s status=%d bytes=%d duracao_ms=%.1f",
+                    "Segmento" if is_segment else "Mídia",
+                    tvg_id,
+                    resource_name,
+                    stream_resp.status_code,
+                    bytes_sent,
+                    (time.perf_counter() - started_at) * 1000,
+                )
             finally:
                 await stream_resp.aclose()
 
